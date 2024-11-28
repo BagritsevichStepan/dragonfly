@@ -103,15 +103,36 @@ PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
   return GroupStep{std::vector<std::string>(fields.begin(), fields.end()), std::move(reducers)};
 }
 
-PipelineStep MakeSortStep(std::string_view field, bool descending) {
-  return [field = std::string(field), descending](std::vector<DocValues> values) -> PipelineResult {
-    std::sort(values.begin(), values.end(), [field](const DocValues& l, const DocValues& r) {
-      auto it1 = l.find(field);
-      auto it2 = r.find(field);
-      return it1 == l.end() || (it2 != r.end() && it1->second < it2->second);
-    });
-    if (descending)
-      std::reverse(values.begin(), values.end());
+PipelineStep MakeSortStep(SortParams sort_params) {
+  return [params = std::move(sort_params)](std::vector<DocValues> values) -> PipelineResult {
+    auto comparator = [&params](const DocValues& l, const DocValues& r) {
+      for (const auto& [field, order] : params.fields) {
+        auto l_it = l.find(field);
+        auto r_it = r.find(field);
+
+        // Handle cases where one of the fields is missing
+        if (l_it == l.end() || r_it == r.end()) {
+          return order == SortParams::SortOrder::ASC ? l_it == l.end() : r_it != r.end();
+        }
+
+        if (l_it->second < r_it->second) {
+          return order == SortParams::SortOrder::ASC;
+        }
+        if (l_it->second > r_it->second) {
+          return order == SortParams::SortOrder::DESC;
+        }
+      }
+      return false;  // Elements are equal
+    };
+
+    if (!params.max) {
+      std::sort(values.begin(), values.end(), comparator);
+    } else {
+      const size_t limit = std::min(values.size(), params.max.value());
+      std::partial_sort(values.begin(), values.begin() + limit, values.end(), comparator);
+      values.resize(limit);
+    }
+
     return values;
   };
 }

@@ -343,3 +343,291 @@ void HnswVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view 
 }
 
 }  // namespace dfly::search
+
+/*
+JSON.SET j1 $ '{"name": "first", "number": 1200, "group": "first"}'
+JSON.SET j2 $ '{"name": "second", "number": 800, "group": "first"}'
+JSON.SET j3 $ '{"name": "third", "number": 300, "group": "first"}'
+JSON.SET j4 $ '{"name": "fourth", "number": 400, "group": "second"}'
+JSON.SET j5 $ '{"name": "fifth", "number": 900, "group": "second"}'
+
+JSON.SET j6 $ '{"name": "sixth", "number": 300, "group": "first"}'
+JSON.SET j7 $ '{"name": "seventh", "number": 400, "group": "second"}'
+
+JSON.SET j8 $ '{"name": "eighth", "group": "first"}'
+JSON.SET j9 $ '{"name": "ninth", "group": "second"}'
+
+FT.CREATE index ON JSON SCHEMA $.name AS name TEXT SORTABLE $.number AS number NUMERIC SORTABLE
+$.group AS group TAG SORTABLE
+
+FT.AGGREGATE index "*" SORTBY 4 @name DESC @number ASC
+FT.AGGREGATE index "*" SORTBY 4 @name ASC @number DESC
+
+FT.AGGREGATE index "*" SORTBY 5 @group ASC @number DESC @name
+FT.AGGREGATE index "*" SORTBY 5 @number ASC @group DESC @name
+
+FT.AGGREGATE index "*" SORTBY 1 @number MAX 3
+FT.AGGREGATE index "*" SORTBY 1 @number MAX 999
+
+FT.AGGREGATE index "*" SORTBY 3 @name @number DESC
+FT.AGGREGATE index "*" SORTBY 999 @name @number DESC
+FT.AGGREGATE index "*" SORTBY -3 @name @number DESC
+FT.AGGREGATE index "*" SORTBY 1 @name MAX -10
+FT.AGGREGATE index "*" SORTBY 1 @name MAX
+FT.AGGREGATE index "*" SORTBY 1 @nonexistingfield
+FT.AGGREGATE index "*" SORTBY notvalue @name
+*/
+
+/*
+127.0.0.1:6379> JSON.SET j1 $ '{"name": "first", "number": 1200, "group": "first"}'
+OK
+127.0.0.1:6379> JSON.SET j2 $ '{"name": "second", "number": 800, "group": "first"}'
+OK
+127.0.0.1:6379> JSON.SET j3 $ '{"name": "third", "number": 300, "group": "first"}'
+OK
+127.0.0.1:6379> JSON.SET j4 $ '{"name": "fourth", "number": 400, "group": "second"}'
+OK
+127.0.0.1:6379> JSON.SET j5 $ '{"name": "fifth", "number": 900, "group": "second"}'
+OK
+127.0.0.1:6379> JSON.SET j6 $ '{"name": "sixth", "number": 300, "group": "first"}'
+OK
+127.0.0.1:6379> JSON.SET j7 $ '{"name": "seventh", "number": 400, "group": "second"}'
+OK
+127.0.0.1:6379> JSON.SET j8 $ '{"name": "eighth", "group": "first"}'
+OK
+127.0.0.1:6379> JSON.SET j9 $ '{"name": "ninth", "group": "second"}'
+OK
+127.0.0.1:6379> FT.CREATE index ON JSON SCHEMA $.name AS name TEXT SORTABLE $.number AS number
+NUMERIC SORTABLE $.group AS group TAG SORTABLE OK 127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 4
+@name DESC @number ASC 1) (integer) 9 2) 1) "name" 2) "third" 3) "number" 4) "300" 3) 1) "name" 2)
+"sixth" 3) "number" 4) "300" 4) 1) "name" 2) "seventh" 3) "number" 4) "400" 5) 1) "name" 2) "second"
+    3) "number"
+    4) "800"
+ 6) 1) "name"
+    2) "ninth"
+ 7) 1) "name"
+    2) "fourth"
+    3) "number"
+    4) "400"
+ 8) 1) "name"
+    2) "first"
+    3) "number"
+    4) "1200"
+ 9) 1) "name"
+    2) "fifth"
+    3) "number"
+    4) "900"
+10) 1) "name"
+    2) "eighth"
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 4 @name ASC @number DESC
+ 1) (integer) 9
+ 2) 1) "name"
+    2) "eighth"
+ 3) 1) "name"
+    2) "fifth"
+    3) "number"
+    4) "900"
+ 4) 1) "name"
+    2) "first"
+    3) "number"
+    4) "1200"
+ 5) 1) "name"
+    2) "fourth"
+    3) "number"
+    4) "400"
+ 6) 1) "name"
+    2) "ninth"
+ 7) 1) "name"
+    2) "second"
+    3) "number"
+    4) "800"
+ 8) 1) "name"
+    2) "seventh"
+    3) "number"
+    4) "400"
+ 9) 1) "name"
+    2) "sixth"
+    3) "number"
+    4) "300"
+10) 1) "name"
+    2) "third"
+    3) "number"
+    4) "300"
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 5 @group ASC @number DESC @name
+ 1) (integer) 9
+ 2) 1) "group"
+    2) "first"
+    3) "number"
+    4) "1200"
+    5) "name"
+    6) "first"
+ 3) 1) "group"
+    2) "first"
+    3) "number"
+    4) "800"
+    5) "name"
+    6) "second"
+ 4) 1) "group"
+    2) "first"
+    3) "number"
+    4) "300"
+    5) "name"
+    6) "sixth"
+ 5) 1) "group"
+    2) "first"
+    3) "number"
+    4) "300"
+    5) "name"
+    6) "third"
+ 6) 1) "group"
+    2) "first"
+    3) "name"
+    4) "eighth"
+ 7) 1) "group"
+    2) "second"
+    3) "number"
+    4) "900"
+    5) "name"
+    6) "fifth"
+ 8) 1) "group"
+    2) "second"
+    3) "number"
+    4) "400"
+    5) "name"
+    6) "fourth"
+ 9) 1) "group"
+    2) "second"
+    3) "number"
+    4) "400"
+    5) "name"
+    6) "seventh"
+10) 1) "group"
+    2) "second"
+    3) "name"
+    4) "ninth"
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 5 @number ASC @group DESC @name
+ 1) (integer) 9
+ 2) 1) "number"
+    2) "300"
+    3) "group"
+    4) "first"
+    5) "name"
+    6) "sixth"
+ 3) 1) "number"
+    2) "300"
+    3) "group"
+    4) "first"
+    5) "name"
+    6) "third"
+ 4) 1) "number"
+    2) "400"
+    3) "group"
+    4) "second"
+    5) "name"
+    6) "fourth"
+ 5) 1) "number"
+    2) "400"
+    3) "group"
+    4) "second"
+    5) "name"
+    6) "seventh"
+ 6) 1) "number"
+    2) "800"
+    3) "group"
+    4) "first"
+    5) "name"
+    6) "second"
+ 7) 1) "number"
+    2) "900"
+    3) "group"
+    4) "second"
+    5) "name"
+    6) "fifth"
+ 8) 1) "number"
+    2) "1200"
+    3) "group"
+    4) "first"
+    5) "name"
+    6) "first"
+ 9) 1) "group"
+    2) "second"
+    3) "name"
+    4) "ninth"
+10) 1) "group"
+    2) "first"
+    3) "name"
+    4) "eighth"
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 1 @number MAX 3
+1) (integer) 9
+2) 1) "number"
+   2) "300"
+3) 1) "number"
+   2) "300"
+4) 1) "number"
+   2) "400"
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 1 @number MAX 999
+ 1) (integer) 9
+ 2) 1) "number"
+    2) "300"
+ 3) 1) "number"
+    2) "300"
+ 4) 1) "number"
+    2) "400"
+ 5) 1) "number"
+    2) "400"
+ 6) 1) "number"
+    2) "800"
+ 7) 1) "number"
+    2) "900"
+ 8) 1) "number"
+    2) "1200"
+ 9) (empty array)
+10) (empty array)
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 3 @name @number DESC
+ 1) (integer) 9
+ 2) 1) "name"
+    2) "eighth"
+ 3) 1) "name"
+    2) "fifth"
+    3) "number"
+    4) "900"
+ 4) 1) "name"
+    2) "first"
+    3) "number"
+    4) "1200"
+ 5) 1) "name"
+    2) "fourth"
+    3) "number"
+    4) "400"
+ 6) 1) "name"
+    2) "ninth"
+ 7) 1) "name"
+    2) "second"
+    3) "number"
+    4) "800"
+ 8) 1) "name"
+    2) "seventh"
+    3) "number"
+    4) "400"
+ 9) 1) "name"
+    2) "sixth"
+    3) "number"
+    4) "300"
+10) 1) "name"
+    2) "third"
+    3) "number"
+    4) "300"
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 999 @name @number DESC
+(error) Bad arguments for SORTBY: Expected an argument, but none provided
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY -3 @name @number DESC
+(error) Bad arguments for SORTBY: Value is outside acceptable bounds
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 1 @name MAX -10
+(error) Bad arguments for MAX: Could not convert argument to expected type
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 1 @name MAX
+(error) Bad arguments for MAX: Could not convert argument to expected type
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY 1 @nonexistingfield
+(error) Property `nonexistingfield` not loaded nor in schema
+127.0.0.1:6379> FT.AGGREGATE index "*" SORTBY notvalue @name
+(error) Bad arguments for SORTBY: Could not convert argument to expected type
+
+*/
