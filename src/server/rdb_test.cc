@@ -45,7 +45,7 @@ class RdbTest : public BaseFamilyTest {
   static void SetUpTestSuite() {
     static bool init = true;
     if (exchange(init, false)) {
-      fb2::SetDefaultStackResource(&fb2::std_malloc_resource, 32_KB);
+      fb2::SetDefaultStackResource(&fb2::std_malloc_resource, 128_KB);
     }
     BaseFamilyTest::SetUpTestSuite();
   }
