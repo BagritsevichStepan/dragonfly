@@ -70,6 +70,20 @@ bool IsValidJsonPath(string_view path) {
   return !ec;
 }
 
+struct Statistics {
+  std::vector<size_t> number_of_documents_before_limit;
+  std::vector<size_t> number_of_documents_after_limit;
+
+  std::vector<size_t> fields_per_doc_all;
+  std::vector<double> avg_fields_per_doc_per_query;
+
+  std::vector<size_t> number_fields_in_return_options;
+  std::vector<size_t> number_fields_in_load_options;
+};
+
+std::mutex stats_mutex;
+Statistics stats;
+
 search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   search::SchemaField::VectorParams params{};
 
@@ -571,14 +585,37 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
 void SearchReply(const SearchParams& params,
                  std::optional<search::KnnScoreSortOption> knn_sort_option,
                  absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
+  std::vector<size_t> number_of_fields_per_doc;
+  size_t number_of_docs_before_limit = 0;
+  size_t number_of_fields_in_documents = 0;
+
   size_t total_hits = 0;
   absl::InlinedVector<SerializedSearchDoc*, 5> docs;
   docs.reserve(results.size());
   for (auto& shard_results : results) {
     total_hits += shard_results.total_hits;
+    number_of_docs_before_limit += shard_results.docs.size();
     for (auto& doc : shard_results.docs) {
+      const size_t number_of_fields = doc.values.size();
+      if (number_of_fields > 0) {
+        number_of_fields_per_doc.push_back(number_of_fields);
+        number_of_fields_in_documents += doc.values.size();
+      }
       docs.push_back(&doc);
     }
+  }
+
+  if (number_of_docs_before_limit > 0) {
+    std::lock_guard lock(stats_mutex);
+    stats.number_of_documents_before_limit.push_back(number_of_docs_before_limit);
+
+    stats.fields_per_doc_all.insert(stats.fields_per_doc_all.end(),
+                                    number_of_fields_per_doc.begin(),
+                                    number_of_fields_per_doc.end());
+
+    stats.avg_fields_per_doc_per_query.push_back(
+        static_cast<double>(number_of_fields_in_documents) /
+        static_cast<double>(number_of_docs_before_limit));
   }
 
   size_t size = docs.size();
@@ -639,6 +676,25 @@ void SearchReply(const SearchParams& params,
 
   const bool reply_with_ids_only = params.IdsOnly();
 
+  const size_t number_of_docs_after_limit = end - offset;
+  if (number_of_docs_after_limit > 0) {
+    std::lock_guard lock(stats_mutex);
+    stats.number_of_documents_after_limit.push_back(number_of_docs_after_limit);
+
+    if (number_of_docs_after_limit > 0) {
+      const size_t return_fields = params.return_fields ? params.return_fields->size() : 0;
+      const size_t load_fields = params.load_fields ? params.load_fields->size() : 0;
+
+      if (return_fields > 0) {
+        stats.number_fields_in_return_options.push_back(return_fields);
+      }
+
+      if (load_fields > 0) {
+        stats.number_fields_in_load_options.push_back(load_fields);
+      }
+    }
+  }
+
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   RedisReplyBuilder::ArrayScope scope{rb, reply_with_ids_only ? (limit + 1) : (limit * 2 + 1)};
 
@@ -657,7 +713,98 @@ void SearchReply(const SearchParams& params,
   }
 }
 
+template <typename T> double Average(const std::vector<T>& v) {
+  if (v.empty())
+    return 0.0;
+  double sum = std::accumulate(v.begin(), v.end(), 0.0);
+  return sum / v.size();
+}
+
+template <typename T> double Median(std::vector<T>& v) {
+  if (v.empty())
+    return 0.0;
+  std::sort(v.begin(), v.end());
+  size_t mid = v.size() / 2;
+  if (v.size() % 2 == 0)
+    return (v[mid - 1] + v[mid]) / 2.0;
+  else
+    return v[mid];
+}
+
+struct StatSummary {
+  double avg = 0.0;
+  double median = 0.0;
+};
+
+template <typename T> StatSummary ComputeSummary(std::vector<T>& v) {
+  StatSummary s;
+  s.avg = Average(v);
+  s.median = Median(v);
+  return s;
+}
+
 }  // namespace
+
+void SearchFamily::FtGetStats(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  Statistics stats_copy;
+  {
+    std::lock_guard lock(stats_mutex);
+    stats_copy = stats;
+  }
+
+  StatSummary docs_before = ComputeSummary(stats_copy.number_of_documents_before_limit);
+  StatSummary docs_after = ComputeSummary(stats_copy.number_of_documents_after_limit);
+  StatSummary fields_global = ComputeSummary(stats_copy.fields_per_doc_all);
+  StatSummary fields_per_query = ComputeSummary(stats_copy.avg_fields_per_doc_per_query);
+  StatSummary return_fields = ComputeSummary(stats_copy.number_fields_in_return_options);
+  StatSummary load_fields = ComputeSummary(stats_copy.number_fields_in_load_options);
+
+  rb->StartArray(12);
+
+  rb->SendBulkString("documents_before_limit");
+  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->SendBulkString("avg");
+  rb->SendDouble(docs_before.avg);
+  rb->SendBulkString("median");
+  rb->SendDouble(docs_before.median);
+
+  rb->SendBulkString("documents_after_limit");
+  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->SendBulkString("avg");
+  rb->SendDouble(docs_after.avg);
+  rb->SendBulkString("median");
+  rb->SendDouble(docs_after.median);
+
+  rb->SendBulkString("fields_per_doc_global");
+  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->SendBulkString("avg");
+  rb->SendDouble(fields_global.avg);
+  rb->SendBulkString("median");
+  rb->SendDouble(fields_global.median);
+
+  rb->SendBulkString("avg_fields_per_doc_per_query");
+  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->SendBulkString("avg");
+  rb->SendDouble(fields_per_query.avg);
+  rb->SendBulkString("median");
+  rb->SendDouble(fields_per_query.median);
+
+  rb->SendBulkString("return_options_fields_count");
+  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->SendBulkString("avg");
+  rb->SendDouble(return_fields.avg);
+  rb->SendBulkString("median");
+  rb->SendDouble(return_fields.median);
+
+  rb->SendBulkString("load_options_fields_count");
+  rb->StartCollection(2, RedisReplyBuilder::MAP);
+  rb->SendBulkString("avg");
+  rb->SendDouble(load_fields.avg);
+  rb->SendBulkString("median");
+  rb->SendDouble(load_fields.median);
+}
 
 void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* builder = cmd_cntx.rb;
@@ -1278,7 +1425,8 @@ void SearchFamily::Register(CommandRegistry* registry) {
             << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
             << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
             << CI{"FT.SYNUPDATE", CO::WRITE | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
-                   FtSynUpdate);
+                   FtSynUpdate)
+            << CI{"FT.GETSTATS", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtGetStats);
 }
 
 }  // namespace dfly

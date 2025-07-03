@@ -20,6 +20,7 @@ struct CommandContext;
 class SearchFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
+  static void FtGetStats(CmdArgList args, const CommandContext& cmd_cntx);
   static void FtCreate(CmdArgList args, const CommandContext& cmd_cntx);
   static void FtAlter(CmdArgList args, const CommandContext& cmd_cntx);
   static void FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx);
