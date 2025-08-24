@@ -7,10 +7,6 @@
 namespace dfly::join {
 
 namespace {
-
-using KeyIndex = size_t;
-using KeyIndexes = Vector<KeyIndex>;
-
 // Joins joined_entries with new index entries using join_expressions.
 // It uses hash joining algorithm to find matching entries.
 std::vector<KeyIndexes> JoinWithNewIndex(
@@ -90,7 +86,9 @@ std::vector<KeyIndexes> JoinWithNewIndex(
 
 }  // anonymous namespace
 
-Vector<Vector<Key>> JoinAllIndexes(EntriesPerIndex indexes_entries, IndexesJoinExpressions joins) {
+Vector<Vector<Key>> JoinAllIndexes(
+    EntriesPerIndex indexes_entries, IndexesJoinExpressions joins,
+    absl::FunctionRef<void(std::vector<KeyIndexes>*)> aggregate_after_join) {
   if (indexes_entries.empty()) {
     return {};
   }
@@ -118,6 +116,10 @@ Vector<Vector<Key>> JoinAllIndexes(EntriesPerIndex indexes_entries, IndexesJoinE
   for (size_t i = 1; i < indexes_entries.size(); ++i) {
     joined_entries = JoinWithNewIndex(indexes_entries, joined_entries, i, joins[i]);
   }
+
+  // Apply aggregation after join if needed
+  // It can change size of joined_entries
+  aggregate_after_join(&joined_entries);
 
   const size_t result_size = joined_entries.size();
   const size_t indexes_count = indexes_entries.size();

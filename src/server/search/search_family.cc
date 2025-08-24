@@ -516,6 +516,14 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   // Used for join params
   absl::flat_hash_set<std::string> current_known_indexes;
   current_known_indexes.insert(std::string{params.index});
+  while (parser->HasNext() && parser->Check("LOAD_FROM")) {
+    auto join_params = ParseAggregatorJoinParams(parser, &current_known_indexes);
+    if (!join_params) {
+      return make_unexpected(join_params.error());
+    }
+    params.joins.emplace_back(std::move(join_params).value());
+  }
+  const bool joining_enabled = !params.joins.empty();
 
   while (parser->HasNext()) {
     // GROUPBY nargs property [property ...]
@@ -571,14 +579,23 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
         return make_unexpected(sort_params.error());  // Propagate the specific error
       }
 
-      params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
+      if (!joining_enabled || params.join_agg_params.HasValue()) {
+        params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
+      } else {
+        params.join_agg_params.sort = std::move(sort_params).value();
+      }
       continue;
     }
 
     // LIMIT
     if (parser->Check("LIMIT")) {
       auto [offset, num] = parser->Next<size_t, size_t>();
-      params.steps.push_back(aggregate::MakeLimitStep(offset, num));
+      if (!joining_enabled || params.join_agg_params.HasLimit()) {
+        params.steps.push_back(aggregate::MakeLimitStep(offset, num));
+      } else {
+        params.join_agg_params.limit_offset = offset;
+        params.join_agg_params.limit_total = num;
+      }
       continue;
     }
 
@@ -593,12 +610,7 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
     }
 
     if (parser->Check("LOAD_FROM")) {
-      auto join_params = ParseAggregatorJoinParams(parser, &current_known_indexes);
-      if (!join_params) {
-        return make_unexpected(join_params.error());
-      }
-      params.joins.emplace_back(std::move(join_params).value());
-      continue;
+      return CreateSyntaxError("LOAD_FROM cannot be applied after projectors or reducers"sv);
     }
 
     return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));
@@ -609,6 +621,12 @@ ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
 
 // Data that we need at the first step of join
 struct PreprocessedJoinData {
+  struct SortParam {
+    size_t index;
+    size_t field_index;
+    SortOrder order;
+  };
+
   explicit PreprocessedJoinData(size_t n)
       : indexes(n), needed_fields(n), joins_per_index(n), fields_to_load_per_index(n) {
   }
@@ -624,6 +642,8 @@ struct PreprocessedJoinData {
   join::Vector<join::JoinExpressionsVec> joins_per_index;
   // For each index we store the fields that should be loaded from the document after the join
   join::Vector<join::Vector<std::string_view>> fields_to_load_per_index;
+  // Maps field names to the shard_id and their index in the needed_fields vector
+  join::Vector<SortParam> sort_params;
 };
 
 io::Result<PreprocessedJoinData, ErrorReply> PreprocessDataForJoin(std::string_view index,
@@ -676,6 +696,9 @@ io::Result<PreprocessedJoinData, ErrorReply> PreprocessDataForJoin(std::string_v
       result.joins_per_index[i + 1].emplace_back(
           join::JoinExpression{field_index, foreign_index, foreign_field_index});
     }
+  }
+
+  for (const auto& step : params.steps) {
   }
 
   // Map them to the result.needed_fields
@@ -749,6 +772,54 @@ join::Vector<join::Vector<join::Entry>> MergePreaggregatedShardJoinData(
   }
 
   return indexes_entries;
+}
+
+join::Vector<join::Vector<join::Key>> DoJoin(
+    absl::Span<const std::vector<join::Vector<join::OwnedEntry>>> preaggregated_shard_data,
+    const AggregateParams& params, const PreprocessedJoinData& join_data) {
+  using join::KeyIndexes;
+
+  auto indexes_entries = MergePreaggregatedShardJoinData(preaggregated_shard_data);
+
+  auto sort_and_limit = [&join_data, offset = params.join_agg_params.limit_offset,
+                         total =
+                             params.join_agg_params.limit_total](std::vector<KeyIndexes>* entries) {
+    if (offset >= entries->size()) {
+      entries->clear();
+      return;
+    }
+
+    auto comparator = [sort_params, entries](const KeyIndexes& l, const KeyIndexes& r) {
+      for (const auto& [index, field_index] : sort_params) {
+        const auto& l_value = (*entries)[l[0]][index];
+        const auto& r_value = (*entries)[r[0]][index];
+
+        if (l_value != r_value) {
+          return l_value < r_value;
+        }
+      }
+      return false;
+    };
+
+    size_t limit = offset + total;
+    if (limit >= entries->size()) {
+      std::sort(entries->begin(), entries->end(), std::move(comparator));
+      limit = entries->size();
+    } else {
+      std::partial_sort(entries->begin(), entries->begin() + limit, entries->end(),
+                        std::move(comparator));
+      entries->resize(limit);
+    }
+
+    for (size_t i = offset; i < limit; ++i) {
+      entries[i - offset] = std::move(entries[i]);
+    }
+
+    size_t new_size = std::min(total, entries->size() - offset);
+    entries->resize(new_size);
+  };
+
+  return join::JoinAllIndexes(indexes_entries, join_data.joins_per_index, sort_and_limit);
 }
 
 std::vector<aggregate::DocValues> MergeJoinedKeysWithData(
@@ -1396,8 +1467,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
         false);
 
     // Do join
-    auto joined_entries = join::JoinAllIndexes(
-        MergePreaggregatedShardJoinData(preaggregated_shard_data), data_for_join->joins_per_index);
+    auto joined_entries = DoJoin(preaggregated_shard_data, *params, *data_for_join);
 
     // Collect doc_ids per index that were joined
     // Each shard stores set of doc_ids per each index that was joined
